@@ -5,7 +5,7 @@ import pandas as pd
 
 
 def _get_fields_dataframe(icartt_df):
-    return icartt_df.columns.levels[0]
+    return icartt_df.columns
 
 
 def search_icartt_fields(icartt_data, field_re, ignore_case=True, require_single_match=False):

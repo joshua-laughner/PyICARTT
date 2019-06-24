@@ -3,6 +3,7 @@ from __future__ import print_function, division, absolute_import, unicode_litera
 import numpy as np
 import pandas as pd
 import re
+from xlrd import open_workbook
 
 
 class ICARTTError(Exception):
@@ -181,3 +182,54 @@ def _read_icartt_header(icartt_file):
         metadata['normal_comments'] = read_normal_comments(ict)
 
     return nheader, file_type, metadata, var_info
+
+
+def _make_icartt_datetimes(data_start_date, utc_seconds):
+    datetimes = [data_start_date + pd.Timedelta(seconds=s) for s in utc_seconds]
+    return pd.DatetimeIndex(datetimes)
+
+
+def read_tbl_file(tbl_file, data_dict_file=None):
+    data = pd.read_csv(tbl_file, sep='\s+')
+    if data_dict_file is None:
+        return data
+
+    extra_info = _read_tbl_data_dict(data_dict_file, data.keys())
+    data.index = _make_tbl_datetime(data['Year'], data['DOY'], data['UTC'])
+
+    return data, extra_info
+
+
+def _read_tbl_data_dict(data_dict_file, variables):
+    def read_column_as_array(s, col_idx):
+        arr = [s.cell(r, col_idx).value for r in range(1, s.nrows)]
+        return np.array(arr)
+
+    indices = {'unit': 'unit'}
+    values = dict()
+
+    book = open_workbook(data_dict_file)
+    sheet = book.sheet_by_index(0)
+
+    # First row should be the headers. Look for the one that says "Unit"
+    for out_key, re_str in indices.items():
+        for i in range(1, sheet.ncols):
+            header_str = sheet.cell(0, i).value
+            if re.match(re_str, header_str, re.IGNORECASE):
+                indices[out_key] = i
+                break
+
+    # Assume the variable names are in the first column
+    var_names = read_column_as_array(sheet, 0)
+
+    for key, ind in indices.items():
+        values[key] = read_column_as_array(sheet, ind)
+
+    df = pd.DataFrame(data=values, index=var_names)
+    return df.loc[variables, :].T
+
+
+def _make_tbl_datetime(years, doy, utc):
+    datetimes = [pd.Timestamp(y.item(), 1, 1) + pd.Timedelta(days=d.item()-1, seconds=s.item()) for y, d, s in
+                 zip(years.to_numpy(), doy.to_numpy(), utc.to_numpy())]
+    return pd.DatetimeIndex(datetimes)
