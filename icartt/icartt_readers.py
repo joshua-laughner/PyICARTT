@@ -46,7 +46,7 @@ _special_comment_fields = {'PI_CONTACT_INFO': dict(),
                            r'R\d+': dict()}
 
 
-def read_icartt_file(icartt_file, data_ret_fmt='dataframe'):
+def read_icartt_file(icartt_file, data_ret_fmt='dataframe', index='indep'):
     """
     Read a single ICARTT file.
 
@@ -63,36 +63,40 @@ def read_icartt_file(icartt_file, data_ret_fmt='dataframe'):
      a dictionary with the keys "name", "unit", "fill", and "values". Fill values will still be replaced with NaNs.
     :type data_ret_fmt: str
 
+    :param index: how to index the dataframe, if a dataframe is returned. "indep" will use the independent variable,
+     "datetime" will generate a datetime index.
+
     :return: the ICARTT data, in the format defined by ``data_ret_fmt`` and the ICARTT metadata, as a dict.
     :rtype: dict or :class:`pandas.DataFrame`, dict
     """
-    nheader, file_type, metadata, variable_info = _read_icartt_header(icartt_file)
-    df = pd.read_csv(icartt_file, header=nheader-1)
+    nheader, file_type, metadata, variable_info = _read_icartt_header(icartt_file, var_info_fmt=data_ret_fmt)
+    df = pd.read_csv(icartt_file, header=nheader-1, sep=r'\s*,\s*', engine='python')
 
     # Convert fill values, ULOD flags, and LLOD flags to NaNs
     ulod_flag = metadata['normal_comments']['ULOD_FLAG']
     llod_flag = metadata['normal_comments']['LLOD_FLAG']
-    for icol, info in enumerate(variable_info):
+    for colname, info in variable_info.items():
         if info['fill'] is not None:
             where_fxn = lambda column: ~np.isclose(column, info['fill']) & ~np.isclose(column, llod_flag) & ~np.isclose(column, ulod_flag)
         else:
             where_fxn = lambda column: ~np.isclose(column, llod_flag) & ~np.isclose(column, ulod_flag)
 
-        df.iloc[:, icol].where(where_fxn, inplace=True)
+        df.loc[:, colname].where(where_fxn, inplace=True)
 
-    # Make the independent variable the index. I cannot seem to get this to work after the multiindex is assigned
-    # so unfortunately the units of the index will just have to be known.
-    indep_varname = variable_info[0]['name']
-    df.set_index(indep_varname, inplace=True, verify_integrity=True)
-
-    # Change the column index to be a multiindex where the second row is the units.
-    multi_ind = pd.MultiIndex.from_tuples([(vi['name'], vi['unit']) for vi in variable_info[1:]])
-    df.columns = multi_ind
+    indep_varname = variable_info.columns[0]
+    if index == 'indep':
+        # Make the independent variable the index. I cannot seem to get this to work after the multiindex is assigned
+        # so unfortunately the units of the index will just have to be known.
+        df.set_index(indep_varname, inplace=True, verify_integrity=True)
+    elif index == 'datetime':
+        df.index = _make_icartt_datetimes(metadata['data_start_date'], df[indep_varname])
+    else:
+        raise ValueError('index == "{}" is not allowed. Only allowed values are "indep" and "datetime"'.format(index))
 
     return df, metadata, variable_info
 
 
-def _read_icartt_header(icartt_file):
+def _read_icartt_header(icartt_file, var_info_fmt='dataframe'):
     def parse_one_line(line, split_on=None, type_out=str):
         if split_on:
             return tuple(type_out(v.strip()) for v in line.split(split_on))
@@ -124,10 +128,15 @@ def _read_icartt_header(icartt_file):
             var_names.append(this_var_name)
             var_units.append(this_var_unit)
 
-        # Convert to a list of dictionaries for cleaner organization
-        var_info = []
-        for name, unit, scale, fill in zip(var_names, var_units, var_scale_factors, var_fill_values):
-            var_info.append({'name': name, 'unit': unit, 'scale': scale, 'fill': fill})
+        if var_info_fmt == 'dict':
+            # Convert to a list of dictionaries for cleaner organization
+            var_info = []
+            for name, unit, scale, fill in zip(var_names, var_units, var_scale_factors, var_fill_values):
+                var_info.append({'name': name, 'unit': unit, 'scale': scale, 'fill': fill})
+        elif var_info_fmt == 'dataframe':
+            var_info = pd.DataFrame({'unit': var_units, 'scale': var_scale_factors, 'fill': var_fill_values}, index=var_names).T
+        else:
+            raise ValueError('var_info_fmt "{}" is not allowed. Must be "dict" or "dataframe".')
 
         return var_info
 
