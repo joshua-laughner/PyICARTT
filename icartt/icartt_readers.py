@@ -3,7 +3,7 @@ from __future__ import print_function, division, absolute_import, unicode_litera
 import numpy as np
 import pandas as pd
 import re
-from xlrd import open_workbook
+#from xlrd import open_workbook
 
 
 class ICARTTError(Exception):
@@ -46,7 +46,7 @@ _special_comment_fields = {'PI_CONTACT_INFO': dict(),
                            r'R\d+': dict()}
 
 
-def read_icartt_file(icartt_file, data_ret_fmt='dataframe', index='indep'):
+def read_icartt_file(icartt_file, data_ret_fmt='dataframe', index='indep', encoding='utf-8'):
     """
     Read a single ICARTT file.
 
@@ -66,11 +66,20 @@ def read_icartt_file(icartt_file, data_ret_fmt='dataframe', index='indep'):
     :param index: how to index the dataframe, if a dataframe is returned. "indep" will use the independent variable,
      "datetime" will generate a datetime index.
 
+    :param encoding: text encoding of the ICARTT file. Try specifying an alternate encoding (e.g. ISO-8859-1) with this 
+     keyword if you encounter unicode decoding errors. A list of encodings recognized by Python can be found 
+     `here <https://docs.python.org/3/library/codecs.html#standard-encodings>`_. To identify the encoding of a file,
+     try using the ``file`` command line program on Linux systems.
+
     :return: the ICARTT data, in the format defined by ``data_ret_fmt`` and the ICARTT metadata, as a dict.
     :rtype: dict or :class:`pandas.DataFrame`, dict
     """
-    nheader, file_type, metadata, variable_info = _read_icartt_header(icartt_file, var_info_fmt=data_ret_fmt)
-    df = pd.read_csv(icartt_file, header=nheader-1, sep=r'\s*,\s*', engine='python')
+    nheader, file_type, metadata, variable_info, indep_varname, delimiter = _read_icartt_header(icartt_file, var_info_fmt=data_ret_fmt, encoding=encoding)
+    if delimiter == ',':
+        read_kws = {'sep': r'\s*,\s*', 'engine': 'python'}
+    elif delimiter == ' ':
+        read_kws = {'sep': r'\s+'}
+    df = pd.read_csv(icartt_file, header=nheader-1, encoding=encoding, **read_kws)
 
     # Convert fill values, ULOD flags, and LLOD flags to NaNs
     ulod_flag = metadata['normal_comments']['ULOD_FLAG']
@@ -83,7 +92,6 @@ def read_icartt_file(icartt_file, data_ret_fmt='dataframe', index='indep'):
 
         df.loc[:, colname].where(where_fxn, inplace=True)
 
-    indep_varname = variable_info.columns[0]
     if index == 'indep':
         # Make the independent variable the index. I cannot seem to get this to work after the multiindex is assigned
         # so unfortunately the units of the index will just have to be known.
@@ -96,7 +104,7 @@ def read_icartt_file(icartt_file, data_ret_fmt='dataframe', index='indep'):
     return df, metadata, variable_info
 
 
-def _read_icartt_header(icartt_file, var_info_fmt='dataframe'):
+def _read_icartt_header(icartt_file, var_info_fmt='dataframe', encoding='utf-8'):
     def parse_one_line(line, split_on=None, type_out=str):
         if split_on:
             return tuple(type_out(v.strip()) for v in line.split(split_on))
@@ -108,9 +116,15 @@ def _read_icartt_header(icartt_file, var_info_fmt='dataframe'):
         return parse_one_line(line, split_on=split_on, type_out=type_out)
 
     def parse_var_line(fhandle):
-        return get_one_line(fhandle, split_on=',')
+        parts = get_one_line(fhandle, split_on=',')
+        if len(parts) == 1:
+            # ARCTAS 10s multiday merge files don't include a unit
+            return parts[0], 'none'
+        else:
+            # FIREX-AQ 10s multiday merge file includes more than name and unit
+            return parts[:2]
 
-    def get_variable_info(fhandle):
+    def get_variable_info(fhandle, split_on=','):
         # Get the independent variable name and units
         independent_var_name, independent_var_unit = parse_var_line(fhandle)
         var_names = [independent_var_name]
@@ -120,8 +134,8 @@ def _read_icartt_header(icartt_file, var_info_fmt='dataframe'):
         var_fill_values = [None]
 
         nvars = get_one_line(fhandle, type_out=int)
-        var_scale_factors += get_one_line(fhandle, split_on=',', type_out=float)
-        var_fill_values += get_one_line(fhandle, split_on=',', type_out=float)
+        var_scale_factors += get_one_line(fhandle, split_on=split_on, type_out=float)
+        var_fill_values += get_one_line(fhandle, split_on=split_on, type_out=float)
 
         for i in range(nvars):
             this_var_name, this_var_unit = parse_var_line(fhandle)
@@ -130,15 +144,15 @@ def _read_icartt_header(icartt_file, var_info_fmt='dataframe'):
 
         if var_info_fmt == 'dict':
             # Convert to a list of dictionaries for cleaner organization
-            var_info = []
+            var_info = dict()
             for name, unit, scale, fill in zip(var_names, var_units, var_scale_factors, var_fill_values):
-                var_info.append({'name': name, 'unit': unit, 'scale': scale, 'fill': fill})
+                var_info[name] = {'unit': unit, 'scale': scale, 'fill': fill}
         elif var_info_fmt == 'dataframe':
             var_info = pd.DataFrame({'unit': var_units, 'scale': var_scale_factors, 'fill': var_fill_values}, index=var_names).T
         else:
             raise ValueError('var_info_fmt "{}" is not allowed. Must be "dict" or "dataframe".')
 
-        return var_info
+        return var_info, independent_var_name
 
     def read_special_comments(fhandle):
         n_comment_lines = get_one_line(fhandle, type_out=int)
@@ -165,8 +179,16 @@ def _read_icartt_header(icartt_file, var_info_fmt='dataframe'):
 
         return normal_comments
 
-    with open(icartt_file, 'r') as ict:
-        nheader, file_type = get_one_line(ict, split_on=',')
+    with open(icartt_file, 'r', encoding=encoding) as ict:
+        # The INTEX-NA 10s merge "all" file is very inconsistent in its use of delimiter; everything EXCEPT the lines
+        # defining the variable units are space delimited, but those lines are comma delimited. We can infer the overall
+        # delimiter from the first line. If any future file has the variable info lines be space delimited, we'll have to
+        # infer those separately.
+        line = ict.readline()
+        delimiter = ',' if ',' in line else ' '
+        ict.seek(0)
+
+        nheader, file_type = get_one_line(ict, split_on=delimiter)
         nheader = int(nheader)
         if file_type != '1001':
             raise NotImplementedError('File types other than "1001" are not yet supported')
@@ -176,21 +198,21 @@ def _read_icartt_header(icartt_file, var_info_fmt='dataframe'):
         metadata['organization'] = get_one_line(ict)
         metadata['data_description'] = get_one_line(ict)
         metadata['mission_name'] = get_one_line(ict)
-        metadata['volume_num'], metadata['total_num_volumes'] = get_one_line(ict, split_on=',', type_out=int)
+        metadata['volume_num'], metadata['total_num_volumes'] = get_one_line(ict, split_on=delimiter, type_out=int)
 
         # Dates require special handling
-        data_start_yr, data_start_month, data_start_day, rev_year, rev_month, rev_day = get_one_line(ict, split_on=',', type_out=int)
+        data_start_yr, data_start_month, data_start_day, rev_year, rev_month, rev_day = get_one_line(ict, split_on=delimiter, type_out=int)
         metadata['data_start_date'] = pd.Timestamp(data_start_yr, data_start_month, data_start_day)
         metadata['revision_date'] = pd.Timestamp(rev_year, rev_month, rev_day)
         metadata['data_interval_s'] = get_one_line(ict, type_out=float)
 
         # Variable information will be used when parsing the data, but not explicitly included in the metadata
-        var_info = get_variable_info(ict)
+        var_info, indep_varname = get_variable_info(ict, split_on=delimiter)
 
         metadata['special_comments'] = read_special_comments(ict)
         metadata['normal_comments'] = read_normal_comments(ict)
 
-    return nheader, file_type, metadata, var_info
+    return nheader, file_type, metadata, var_info, indep_varname, delimiter
 
 
 def _make_icartt_datetimes(data_start_date, utc_seconds):
