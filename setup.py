@@ -8,5 +8,8 @@ setup(
     license='',
     author='Joshua Laughner',
     author_email='jlaugh@caltech.edu',
-    description=''
+    description='',
+    entry_points={'console_scripts': [
+            'icartt2nc=icartt.icartt2nc:main'
+        ]}, 
 )
