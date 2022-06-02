@@ -3,7 +3,6 @@ from __future__ import print_function, division, absolute_import, unicode_litera
 import numpy as np
 import pandas as pd
 import re
-#from xlrd import open_workbook
 
 
 class ICARTTError(Exception):
@@ -235,6 +234,12 @@ def _read_tbl_data_dict(data_dict_file, variables):
     def read_column_as_array(s, col_idx):
         arr = [s.cell(r, col_idx).value for r in range(1, s.nrows)]
         return np.array(arr)
+
+    try:
+        from xlrd import open_workbook
+    except ImportError:
+        raise ImportError('xlrd is a soft dependency, but is required when reading tbl Excel files.')
+
 
     indices = {'unit': 'unit'}
     values = dict()
